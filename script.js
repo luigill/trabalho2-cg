@@ -5,20 +5,19 @@ in vec4 a_position;
 in vec2 a_texcoord;
 in vec3 a_normal;
 
-uniform vec3 u_lightWorldPosition;
-uniform vec3 u_viewWorldPosition;
-
 uniform mat4 u_projection;
 uniform mat4 u_view;
 uniform mat4 u_world;
 uniform mat4 u_textureMatrix;
 
 out vec2 v_texcoord;
-out vec4 v_projectedTexcoord;
+out vec3 v_projectedTexcoord;
 out vec3 v_normal;
-
 out vec3 v_surfaceToLight;
 out vec3 v_surfaceToView;
+
+uniform vec3 u_lightWorldPosition;
+uniform vec3 u_viewWorldPosition;
 
 void main() {
   // Multiply the position by the matrix.
@@ -29,21 +28,19 @@ void main() {
   // Pass the texture coord to the fragment shader.
   v_texcoord = a_texcoord;
 
-  v_projectedTexcoord = u_textureMatrix * worldPosition;
+  vec4 projectedTexcoord = u_textureMatrix * worldPosition;
+  v_projectedTexcoord = projectedTexcoord.xyz / projectedTexcoord.w;
 
   // orient the normals and pass to the fragment shader
   v_normal = mat3(u_world) * a_normal;
-
-  // compute the world position of the surface
-  vec3 surfaceWorldPosition = (u_world * a_position).xyz;
-
-  // compute the vector of the surface to the light
+  
+  // Compute the vector of the surface to the light
   // and pass it to the fragment shader
-  v_surfaceToLight = u_lightWorldPosition - surfaceWorldPosition;
+  v_surfaceToLight = u_lightWorldPosition - worldPosition.xyz;
 
-  // compute the vector of the surface to the view/camera
+  // Compute the vector of the surface to the view/camera
   // and pass it to the fragment shader
-  v_surfaceToView = u_viewWorldPosition - surfaceWorldPosition;
+  v_surfaceToView = u_viewWorldPosition - worldPosition.xyz;
 }
 `;
 
@@ -52,7 +49,7 @@ precision highp float;
 
 // Passed in from the vertex shader.
 in vec2 v_texcoord;
-in vec4 v_projectedTexcoord;
+in vec3 v_projectedTexcoord;
 in vec3 v_normal;
 in vec3 v_surfaceToLight;
 in vec3 v_surfaceToView;
@@ -61,59 +58,57 @@ uniform vec4 u_colorMult;
 uniform sampler2D u_texture;
 uniform sampler2D u_projectedTexture;
 uniform float u_bias;
-uniform float u_shadowMapSize;
+uniform vec2 u_shadowMapSize;
 uniform float u_shininess;
-uniform vec3 u_lightDirection;
-uniform float u_innerLimit;
-uniform float u_outerLimit;
-uniform float u_ambientLight;
-uniform float u_lightIntensity;
+uniform vec3 u_lightColor;
 
 out vec4 outColor;
 
-float getShadow(vec3 projectedTexcoord, float currentDepth, float bias) {
-    float shadow = 0.0;
-    float texelSize = 1.0 / u_shadowMapSize;
+float sampleShadowMap(vec2 uv, float compare) {
+    float depth = texture(u_projectedTexture, uv).r;
+    return step(compare, depth);
+}
+
+float sampleShadowMapPCF(vec3 projectedTexcoord, float bias) {
+    vec2 texelSize = 1.0 / u_shadowMapSize;
+    float result = 0.0;
     for(int x = -1; x <= 1; ++x) {
         for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = texture(u_projectedTexture, projectedTexcoord.xy + vec2(x, y) * texelSize).r; 
-            shadow += (currentDepth - bias > pcfDepth) ? 1.0 : 0.0;
+            vec2 offset = vec2(float(x), float(y)) * texelSize;
+            result += sampleShadowMap(projectedTexcoord.xy + offset, projectedTexcoord.z - bias);
         }
     }
-    shadow /= 9.0;
-    return shadow;
+    return result / 9.0;
 }
 
 void main() {
     vec3 normal = normalize(v_normal);
-
     vec3 surfaceToLightDirection = normalize(v_surfaceToLight);
     vec3 surfaceToViewDirection = normalize(v_surfaceToView);
     vec3 halfVector = normalize(surfaceToLightDirection + surfaceToViewDirection);
 
-    float dotFromDirection = dot(surfaceToLightDirection, -u_lightDirection);
-    float limitRange = u_innerLimit - u_outerLimit;
-    float inLight = clamp((dotFromDirection - u_outerLimit) / limitRange, 0.0, 1.0);
-    float light = inLight * dot(normal, surfaceToLightDirection);
-    float specular = inLight * pow(dot(normal, halfVector), u_shininess);
+    float light = dot(normal, surfaceToLightDirection);
+    float specular = 0.0;
+    if (light > 0.0) {
+        specular = pow(dot(normal, halfVector), u_shininess);
+    }
 
-    vec3 projectedTexcoord = v_projectedTexcoord.xyz / v_projectedTexcoord.w;
-    float currentDepth = projectedTexcoord.z;
+    float currentDepth = v_projectedTexcoord.z + u_bias;
 
-    bool inRange = 
-        projectedTexcoord.x >= 0.0 &&
-        projectedTexcoord.x <= 1.0 &&
-        projectedTexcoord.y >= 0.0 &&
-        projectedTexcoord.y <= 1.0;
+    bool inRange =
+        v_projectedTexcoord.x >= 0.0 &&
+        v_projectedTexcoord.x <= 1.0 &&
+        v_projectedTexcoord.y >= 0.0 &&
+        v_projectedTexcoord.y <= 1.0;
 
-    float shadow = inRange ? getShadow(projectedTexcoord, currentDepth, u_bias) : 0.0;
+    float shadowLight = inRange ? sampleShadowMapPCF(v_projectedTexcoord, u_bias) : 1.0;
 
     vec4 texColor = texture(u_texture, v_texcoord) * u_colorMult;
-    vec3 ambient = texColor.rgb * u_ambientLight;
-    vec3 diffuse = texColor.rgb * light * (1.0 - shadow) * u_lightIntensity;
-    vec3 finalColor = ambient + diffuse + vec3(specular * (1.0 - shadow));
+    vec3 ambient = texColor.rgb * 0.1;
+    vec3 diffuse = texColor.rgb * light * u_lightColor;
+    vec3 specularColor = specular * u_lightColor;
 
-    outColor = vec4(finalColor, texColor.a);
+    outColor = vec4(ambient + (diffuse + specularColor) * shadowLight, texColor.a);
 }
 `;
 
@@ -302,9 +297,9 @@ function main() {
     projHeight: 1,
     perspective: true,
     fieldOfView: 120,
-    bias: -0.00001, // Adjusted bias for better shadow rendering
-    ambientLight: 0.5,
-    lightIntensity: 1.5,
+    bias: -0.0001, // Adjusted bias for better shadow rendering
+    ambientLight: 0.7,
+    lightIntensity: 2.5,
   };
   webglLessonsUI.setupUI(document.querySelector("#ui"), settings, [
     {
@@ -412,24 +407,25 @@ function main() {
 
   const fieldOfViewRadians = degToRad(60);
 
-  // Uniforms for each object.
-  const planeUniforms = {
-    u_colorMult: [0.5, 0.5, 1, 1], // lightblue
-    u_color: [1, 0, 0, 1],
-    u_texture: checkerboardTexture,
-    u_world: m4.translation(0, 0, 0),
-  };
   const sphereUniforms = {
     u_colorMult: [1, 0.5, 0.5, 1], // pink
     u_color: [0, 0, 1, 1],
     u_texture: checkerboardTexture,
     u_world: m4.translation(2, 3, 4),
   };
+
   const cubeUniforms = {
     u_colorMult: [0.5, 1, 0.5, 1], // lightgreen
     u_color: [0, 0, 1, 1],
     u_texture: checkerboardTexture,
     u_world: m4.translation(3, 1, 0),
+  };
+
+  const planeUniforms = {
+    u_colorMult: [0.5, 0.5, 1, 1], // lightblue
+    u_color: [1, 0, 0, 1],
+    u_texture: checkerboardTexture,
+    u_world: m4.translation(0, 0, 0),
   };
 
   function drawScene(
@@ -453,15 +449,11 @@ function main() {
       u_bias: settings.bias,
       u_textureMatrix: textureMatrix,
       u_projectedTexture: depthTexture,
-      u_shadowMapSize: depthTextureSize,
-      u_shininess: 150,
-      u_innerLimit: Math.cos(degToRad(settings.fieldOfView / 2 - 10)),
-      u_outerLimit: Math.cos(degToRad(settings.fieldOfView / 2)),
-      u_lightDirection: lightWorldMatrix.slice(8, 11).map((v) => -v),
+      u_shadowMapSize: [depthTextureSize, depthTextureSize],
       u_lightWorldPosition: [settings.posX, settings.posY, settings.posZ],
       u_viewWorldPosition: cameraMatrix.slice(12, 15),
-      u_ambientLight: settings.ambientLight,
-      u_lightIntensity: settings.lightIntensity,
+      u_lightColor: [1, 1, 1],
+      u_shininess: 150,
     });
 
     // ------ Draw the sphere --------
