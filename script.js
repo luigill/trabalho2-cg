@@ -66,6 +66,8 @@ uniform float u_shininess;
 uniform vec3 u_lightDirection;
 uniform float u_innerLimit;
 uniform float u_outerLimit;
+uniform float u_ambientLight;
+uniform float u_lightIntensity;
 
 out vec4 outColor;
 
@@ -75,7 +77,7 @@ float getShadow(vec3 projectedTexcoord, float currentDepth, float bias) {
     for(int x = -1; x <= 1; ++x) {
         for(int y = -1; y <= 1; ++y) {
             float pcfDepth = texture(u_projectedTexture, projectedTexcoord.xy + vec2(x, y) * texelSize).r; 
-            shadow += currentDepth - bias > pcfDepth ? 0.5 : 0.0;
+            shadow += (currentDepth - bias > pcfDepth) ? 1.0 : 0.0;
         }
     }
     shadow /= 9.0;
@@ -83,17 +85,13 @@ float getShadow(vec3 projectedTexcoord, float currentDepth, float bias) {
 }
 
 void main() {
-    // because v_normal is a varying it's interpolated
-    // so it will not be a unit vector. Normalizing it
-    // will make it a unit vector again
     vec3 normal = normalize(v_normal);
 
     vec3 surfaceToLightDirection = normalize(v_surfaceToLight);
     vec3 surfaceToViewDirection = normalize(v_surfaceToView);
     vec3 halfVector = normalize(surfaceToLightDirection + surfaceToViewDirection);
 
-    float dotFromDirection = dot(surfaceToLightDirection,
-                                 -u_lightDirection);
+    float dotFromDirection = dot(surfaceToLightDirection, -u_lightDirection);
     float limitRange = u_innerLimit - u_outerLimit;
     float inLight = clamp((dotFromDirection - u_outerLimit) / limitRange, 0.0, 1.0);
     float light = inLight * dot(normal, surfaceToLightDirection);
@@ -102,20 +100,20 @@ void main() {
     vec3 projectedTexcoord = v_projectedTexcoord.xyz / v_projectedTexcoord.w;
     float currentDepth = projectedTexcoord.z;
 
-    bool inRange =
+    bool inRange = 
         projectedTexcoord.x >= 0.0 &&
         projectedTexcoord.x <= 1.0 &&
         projectedTexcoord.y >= 0.0 &&
         projectedTexcoord.y <= 1.0;
 
-    float shadow = getShadow(projectedTexcoord, currentDepth, u_bias);
-    float shadowLight = inRange ? 1.0 - shadow : 1.0;
+    float shadow = inRange ? getShadow(projectedTexcoord, currentDepth, u_bias) : 0.0;
 
     vec4 texColor = texture(u_texture, v_texcoord) * u_colorMult;
-    outColor = vec4(
-        texColor.rgb * light * shadowLight +
-        specular * shadowLight,
-        texColor.a);
+    vec3 ambient = texColor.rgb * u_ambientLight;
+    vec3 diffuse = texColor.rgb * light * (1.0 - shadow) * u_lightIntensity;
+    vec3 finalColor = ambient + diffuse + vec3(specular * (1.0 - shadow));
+
+    outColor = vec4(finalColor, texColor.a);
 }
 `;
 
@@ -258,20 +256,20 @@ function main() {
   gl.generateMipmap(gl.TEXTURE_2D);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-  const depthTextureSize = 1024; // Increased shadow map size
   const depthTexture = gl.createTexture();
+  const depthTextureSize = 2048;
   gl.bindTexture(gl.TEXTURE_2D, depthTexture);
   gl.texImage2D(
-    gl.TEXTURE_2D,
-    0,
-    gl.DEPTH_COMPONENT32F,
-    depthTextureSize,
-    depthTextureSize,
-    0,
-    gl.DEPTH_COMPONENT,
-    gl.FLOAT,
+    gl.TEXTURE_2D, // target
+    0, // mip level
+    gl.DEPTH_COMPONENT32F, // internal format
+    depthTextureSize, // width
+    depthTextureSize, // height
+    0, // border
+    gl.DEPTH_COMPONENT, // format
+    gl.FLOAT, // type
     null
-  );
+  ); // data
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -304,7 +302,9 @@ function main() {
     projHeight: 1,
     perspective: true,
     fieldOfView: 120,
-    bias: -0.006,
+    bias: -0.00001, // Adjusted bias for better shadow rendering
+    ambientLight: 0.5,
+    lightIntensity: 1.5,
   };
   webglLessonsUI.setupUI(document.querySelector("#ui"), settings, [
     {
@@ -460,6 +460,8 @@ function main() {
       u_lightDirection: lightWorldMatrix.slice(8, 11).map((v) => -v),
       u_lightWorldPosition: [settings.posX, settings.posY, settings.posZ],
       u_viewWorldPosition: cameraMatrix.slice(12, 15),
+      u_ambientLight: settings.ambientLight,
+      u_lightIntensity: settings.lightIntensity,
     });
 
     // ------ Draw the sphere --------
