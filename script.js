@@ -281,7 +281,7 @@ function main() {
     projHeight: 10,
     perspective: false,
     fieldOfView: 120,
-    bias: -0.0001,
+    bias: -0.006,
   };
   webglLessonsUI.setupUI(document.querySelector("#ui"), settings, [
     {
