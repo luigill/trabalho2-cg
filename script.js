@@ -11,13 +11,8 @@ uniform mat4 u_world;
 uniform mat4 u_textureMatrix;
 
 out vec2 v_texcoord;
-out vec3 v_projectedTexcoord;
+out vec4 v_projectedTexcoord;
 out vec3 v_normal;
-out vec3 v_surfaceToLight;
-out vec3 v_surfaceToView;
-
-uniform vec3 u_lightWorldPosition;
-uniform vec3 u_viewWorldPosition;
 
 void main() {
   // Multiply the position by the matrix.
@@ -28,87 +23,76 @@ void main() {
   // Pass the texture coord to the fragment shader.
   v_texcoord = a_texcoord;
 
-  vec4 projectedTexcoord = u_textureMatrix * worldPosition;
-  v_projectedTexcoord = projectedTexcoord.xyz / projectedTexcoord.w;
+  v_projectedTexcoord = u_textureMatrix * worldPosition;
 
   // orient the normals and pass to the fragment shader
   v_normal = mat3(u_world) * a_normal;
-  
-  // Compute the vector of the surface to the light
-  // and pass it to the fragment shader
-  v_surfaceToLight = u_lightWorldPosition - worldPosition.xyz;
-
-  // Compute the vector of the surface to the view/camera
-  // and pass it to the fragment shader
-  v_surfaceToView = u_viewWorldPosition - worldPosition.xyz;
 }
 `;
 
 const fs = `#version 300 es
 precision highp float;
 
-// Passed in from the vertex shader.
 in vec2 v_texcoord;
-in vec3 v_projectedTexcoord;
+in vec4 v_projectedTexcoord;
 in vec3 v_normal;
-in vec3 v_surfaceToLight;
-in vec3 v_surfaceToView;
 
 uniform vec4 u_colorMult;
 uniform sampler2D u_texture;
 uniform sampler2D u_projectedTexture;
 uniform float u_bias;
-uniform vec2 u_shadowMapSize;
-uniform float u_shininess;
-uniform vec3 u_lightColor;
+uniform vec3 u_reverseLightDirection;
 
 out vec4 outColor;
 
-float sampleShadowMap(vec2 uv, float compare) {
-    float depth = texture(u_projectedTexture, uv).r;
-    return step(compare, depth);
+const int NUM_SAMPLES = 8;   // Number of samples for shadow calculation
+const int NUM_BLOCKER_SAMPLES = 4;   // Number of samples for blocker search
+
+// PCSS Functions
+float SearchBlocker(sampler2D shadowMap, vec2 uv, float compareDepth) {
+    float shadow = 0.0;
+    for (int i = 0; i < NUM_BLOCKER_SAMPLES; i++) {
+        vec2 offset = vec2(float(i % 4) - 1.5, float(i / 4) - 1.5) / vec2(16.0, 16.0);  // Offset for sample points
+        shadow += texture(shadowMap, uv + offset).r < compareDepth ? 1.0 : 0.0;
+    }
+    return shadow / float(NUM_BLOCKER_SAMPLES);
 }
 
-float sampleShadowMapPCF(vec3 projectedTexcoord, float bias) {
-    vec2 texelSize = 1.0 / u_shadowMapSize;
-    float result = 0.0;
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            vec2 offset = vec2(float(x), float(y)) * texelSize;
-            result += sampleShadowMap(projectedTexcoord.xy + offset, projectedTexcoord.z - bias);
-        }
+float PCFSoftShadow(sampler2D shadowMap, vec2 uv, float compareDepth, float filterRadius) {
+    float shadow = 0.0;
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        vec2 offset = vec2(float(i % 4) - 1.5, float(i / 4) - 1.5) * filterRadius / vec2(16.0, 16.0);
+        shadow += texture(shadowMap, uv + offset).r < compareDepth ? 0.0 : 1.0;
     }
-    return result / 9.0;
+    return shadow / float(NUM_SAMPLES);
 }
 
 void main() {
     vec3 normal = normalize(v_normal);
-    vec3 surfaceToLightDirection = normalize(v_surfaceToLight);
-    vec3 surfaceToViewDirection = normalize(v_surfaceToView);
-    vec3 halfVector = normalize(surfaceToLightDirection + surfaceToViewDirection);
+    float light = dot(normal, u_reverseLightDirection);
 
-    float light = dot(normal, surfaceToLightDirection);
-    float specular = 0.0;
-    if (light > 0.0) {
-        specular = pow(dot(normal, halfVector), u_shininess);
-    }
-
-    float currentDepth = v_projectedTexcoord.z + u_bias;
+    vec3 projectedTexcoord = v_projectedTexcoord.xyz / v_projectedTexcoord.w;
+    float currentDepth = projectedTexcoord.z + u_bias;
 
     bool inRange =
-        v_projectedTexcoord.x >= 0.0 &&
-        v_projectedTexcoord.x <= 1.0 &&
-        v_projectedTexcoord.y >= 0.0 &&
-        v_projectedTexcoord.y <= 1.0;
+        projectedTexcoord.x >= 0.0 &&
+        projectedTexcoord.x <= 1.0 &&
+        projectedTexcoord.y >= 0.0 &&
+        projectedTexcoord.y <= 1.0;
 
-    float shadowLight = inRange ? sampleShadowMapPCF(v_projectedTexcoord, u_bias) : 1.0;
+    // Calculate the size of the penumbra using blocker search
+    float avgBlockerDepth = SearchBlocker(u_projectedTexture, projectedTexcoord.xy, currentDepth);
+    float penumbraSize = (currentDepth - avgBlockerDepth) * 40.0;  // Adjust this multiplier for the softness
+
+    // Calculate the soft shadow using PCF
+    float shadowLight = (inRange && avgBlockerDepth > 0.0)
+        ? PCFSoftShadow(u_projectedTexture, projectedTexcoord.xy, currentDepth, penumbraSize)
+        : 1.0;
 
     vec4 texColor = texture(u_texture, v_texcoord) * u_colorMult;
-    vec3 ambient = texColor.rgb * 0.1;
-    vec3 diffuse = texColor.rgb * light * u_lightColor;
-    vec3 specularColor = specular * u_lightColor;
-
-    outColor = vec4(ambient + (diffuse + specularColor) * shadowLight, texColor.a);
+    outColor = vec4(
+        texColor.rgb * light * shadowLight,
+        texColor.a);
 }
 `;
 
@@ -252,7 +236,7 @@ function main() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
   const depthTexture = gl.createTexture();
-  const depthTextureSize = 2048;
+  const depthTextureSize = 512;
   gl.bindTexture(gl.TEXTURE_2D, depthTexture);
   gl.texImage2D(
     gl.TEXTURE_2D, // target
@@ -286,20 +270,18 @@ function main() {
 
   const settings = {
     cameraX: 6,
-    cameraY: 5,
+    cameraY: 12,
     posX: 2.5,
     posY: 4.8,
-    posZ: 4.3,
-    targetX: 2.5,
+    posZ: 7,
+    targetX: 3.5,
     targetY: 0,
     targetZ: 3.5,
-    projWidth: 1,
-    projHeight: 1,
-    perspective: true,
+    projWidth: 10,
+    projHeight: 10,
+    perspective: false,
     fieldOfView: 120,
-    bias: -0.0001, // Adjusted bias for better shadow rendering
-    ambientLight: 0.7,
-    lightIntensity: 2.5,
+    bias: -0.006,
   };
   webglLessonsUI.setupUI(document.querySelector("#ui"), settings, [
     {
@@ -378,7 +360,7 @@ function main() {
       type: "slider",
       key: "projWidth",
       min: 0,
-      max: 2,
+      max: 100,
       change: render,
       precision: 2,
       step: 0.001,
@@ -387,7 +369,7 @@ function main() {
       type: "slider",
       key: "projHeight",
       min: 0,
-      max: 2,
+      max: 100,
       change: render,
       precision: 2,
       step: 0.001,
@@ -407,25 +389,24 @@ function main() {
 
   const fieldOfViewRadians = degToRad(60);
 
+  // Uniforms for each object.
+  const planeUniforms = {
+    u_colorMult: [0.5, 0.5, 1, 1], // lightblue
+    u_color: [1, 0, 0, 1],
+    u_texture: checkerboardTexture,
+    u_world: m4.translation(0, 0, 0),
+  };
   const sphereUniforms = {
     u_colorMult: [1, 0.5, 0.5, 1], // pink
     u_color: [0, 0, 1, 1],
     u_texture: checkerboardTexture,
     u_world: m4.translation(2, 3, 4),
   };
-
   const cubeUniforms = {
     u_colorMult: [0.5, 1, 0.5, 1], // lightgreen
     u_color: [0, 0, 1, 1],
     u_texture: checkerboardTexture,
     u_world: m4.translation(3, 1, 0),
-  };
-
-  const planeUniforms = {
-    u_colorMult: [0.5, 0.5, 1, 1], // lightblue
-    u_color: [1, 0, 0, 1],
-    u_texture: checkerboardTexture,
-    u_world: m4.translation(0, 0, 0),
   };
 
   function drawScene(
@@ -449,11 +430,7 @@ function main() {
       u_bias: settings.bias,
       u_textureMatrix: textureMatrix,
       u_projectedTexture: depthTexture,
-      u_shadowMapSize: [depthTextureSize, depthTextureSize],
-      u_lightWorldPosition: [settings.posX, settings.posY, settings.posZ],
-      u_viewWorldPosition: cameraMatrix.slice(12, 15),
-      u_lightColor: [1, 1, 1],
-      u_shininess: 150,
+      u_reverseLightDirection: lightWorldMatrix.slice(8, 11),
     });
 
     // ------ Draw the sphere --------
@@ -557,7 +534,7 @@ function main() {
     );
 
     // Compute the camera's matrix using look at.
-    const cameraPosition = [settings.cameraX, settings.cameraY, 7];
+    const cameraPosition = [settings.cameraX, settings.cameraY, 15];
     const target = [0, 0, 0];
     const up = [0, 1, 0];
     const cameraMatrix = m4.lookAt(cameraPosition, target, up);
