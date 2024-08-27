@@ -82,7 +82,7 @@ void main() {
 
     // Calculate the size of the penumbra using blocker search
     float avgBlockerDepth = SearchBlocker(u_projectedTexture, projectedTexcoord.xy, currentDepth);
-    float penumbraSize = (currentDepth - avgBlockerDepth) * 40.0;  // Adjust this multiplier for the softness
+    float penumbraSize = (currentDepth - avgBlockerDepth) * 20.0;  // Adjust this multiplier for the softness
 
     // Calculate the soft shadow using PCF
     float shadowLight = (inRange && avgBlockerDepth > 0.0)
@@ -281,7 +281,7 @@ function main() {
     projHeight: 10,
     perspective: false,
     fieldOfView: 120,
-    bias: -0.006,
+    bias: -0.0001,
   };
   webglLessonsUI.setupUI(document.querySelector("#ui"), settings, [
     {
